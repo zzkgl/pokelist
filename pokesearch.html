@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pokédex Nacional Interactiva</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+<script>
+tailwind.config = {
+theme: {
+extend: {
+colors: {
+pokedex: {
+red: '#ef4444',
+dark: '#1f2937',
+}
+}
+}
+}
+}
+</script>
+<style>
+.hide-scrollbar::-webkit-scrollbar { display: none; }
+.hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+.pokemon-unseen img { filter: grayscale(100%) opacity(0.5); transition: all 0.3s ease; }
+.pokemon-seen img { filter: grayscale(0%) opacity(1); transition: all 0.3s ease; }
+</style>
+</head>
+<body class="bg-gray-100 text-gray-800 font-sans min-h-screen flex flex-col">
+
+<header class="bg-pokedex-red text-white shadow-lg sticky top-0 z-50">
+<div class="max-w-7xl mx-auto px-4 py-4 flex flex-col sm:flex-row justify-between items-center gap-4">
+<div class="flex items-center gap-3 w-full sm:w-auto justify-center sm:justify-start">
+<i class="fa-solid fa-compact-disc text-3xl animate-spin-slow" style="animation-duration: 3s;"></i>
+<h1 class="text-2xl font-bold tracking-tight">Pokédex</h1>
+</div>
+<div class="relative w-full max-w-md">
+<div class="relative">
+<input type="text" id="search-input" placeholder="Buscar Pokémon..."
+class="w-full pl-10 pr-4 py-2 rounded-full text-gray-800 bg-white/90 focus:bg-white focus:outline-none focus:ring-2 focus:ring-red-300 transition-all shadow-inner"
+autocomplete="off">
+<i class="fa-solid fa-magnifying-glass absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400"></i>
+</div>
+<ul id="search-dropdown" class="absolute z-50 w-full bg-white mt-2 rounded-xl shadow-xl max-h-60 overflow-y-auto hidden text-gray-800 border border-gray-100 divide-y divide-gray-50"></ul>
+</div>
+
+<div class="bg-black/20 px-4 py-1.5 rounded-full text-sm font-semibold backdrop-blur-sm w-full sm:w-auto text-center">
+<i class="fa-solid fa-eye mr-2"></i>
+<span id="seen-counter">0</span> / 1025 Vistos
+</div>
+</div>
+</header>
+
+<nav class="bg-white shadow-sm z-40">
+<div class="max-w-7xl mx-auto px-4">
+<ul id="region-filters" class="flex gap-2 py-3 overflow-x-auto hide-scrollbar scroll-smooth snap-x">
+</ul>
+</div>
+</nav>
+
+<main class="flex-grow max-w-7xl mx-auto px-4 py-8 w-full">
+<div id="back-to-grid" class="hidden mb-6">
+<button id="back-btn-content" onclick="clearSearch()" class="bg-white px-4 py-2 rounded-lg shadow-sm text-sm font-semibold text-gray-600 hover:text-pokedex-red transition-colors flex items-center gap-2">
+<i class="fa-solid fa-arrow-left"></i> Volver al listado
+</button>
+</div>
+
+<div id="loader" class="flex justify-center items-center py-20 hidden">
+<i class="fa-solid fa-spinner fa-spin text-4xl text-pokedex-red"></i>
+</div>
+
+<section id="pokemon-grid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 lg:gap-6"></section>
+</main>
+
+<script>
+// --- 1. CONFIGURACIÓN Y ESTADO ---
+const REGIONS = [
+{ id: 'kanto', name: 'Kanto', offset: 0, limit: 151, type: 'base' },
+{ id: 'johto', name: 'Johto', offset: 151, limit: 100, type: 'base' },
+{ id: 'hoenn', name: 'Hoenn', offset: 251, limit: 135, type: 'base' },
+{ id: 'sinnoh', name: 'Sinnoh', offset: 386, limit: 107, type: 'base' },
+{ id: 'unova', name: 'Unova', offset: 493, limit: 156, type: 'base' },
+{ id: 'kalos', name: 'Kalos', offset: 649, limit: 72, type: 'base' },
+{ id: 'alola', name: 'Alola', offset: 721, limit: 88, type: 'base' },
+{ id: 'galar', name: 'Galar', offset: 809, limit: 89, type: 'base' },
+{ id: 'paldea', name: 'Paldea', offset: 898, limit: 127, type: 'base' },
+{ id: 'megas', name: 'Megaevoluciones', type: 'special', keywords: ['-mega', '-primal'] },
+{ id: 'regionales', name: 'Formas Regionales', type: 'special', keywords: ['-alola', '-galar', '-hisui', '-paldea'] }
+];
+
+let currentRegion = REGIONS[0];
+let seenPokemon = new Set(JSON.parse(localStorage.getItem('seenPokemon')) || []);
+let allPokemonData = []; // Para el buscador predictivo
+
+// --- NUEVO: Función para calcular progreso por región ---
+function getRegionSeenCount(region) {
+if (region.type === 'base') {
+let count = 0;
+for (let i = 1; i <= region.limit; i++) {
+if (seenPokemon.has(region.offset + i)) count++;
+}
+return { count, total: region.limit };
+} else if (region.type === 'special' && region.specialIds) {
+let count = 0;
+region.specialIds.forEach(id => {
+if (seenPokemon.has(id)) count++;
+});
+return { count, total: region.limit };
+}
+return null; // Si aún no se calculan los IDs especiales
+}
+
+// --- 2. REFERENCIAS DOM ---
+const grid = document.getElementById('pokemon-grid');
+const filtersContainer = document.getElementById('region-filters');
+const loader = document.getElementById('loader');
+const seenCounter = document.getElementById('seen-counter');
+const searchInput = document.getElementById('search-input');
+const searchDropdown = document.getElementById('search-dropdown');
+const backToGridBtn = document.getElementById('back-to-grid');
+
+// --- 3. INICIALIZACIÓN ---
+async function init() {
+renderFilters();
+updateCounter();
+loadPokemonByRegion(currentRegion);
+setupSearch();
+}
+
+// --- 4. LÓGICA DEL BUSCADOR PREDICTIVO ---
+async function setupSearch() {
+try {
+// Aumentamos el límite a 10000 para descargar absolutamente TODAS las generaciones, formas regionales y megas al iniciar
+const res = await fetch('https://pokeapi.co/api/v2/pokemon?limit=10000');
+const data = await res.json();
+// Excluimos tótems y variables basura de la API para resultados más limpios
+allPokemonData = data.results.filter(p => !p.name.includes('-totem'));
+
+// NUEVO: Calculamos los totales de las formas especiales dinámicamente para los contadores
+REGIONS.forEach(region => {
+if (region.type === 'special') {
+const specialMatches = allPokemonData.filter(p => region.keywords.some(kw => p.name.includes(kw)));
+region.limit = specialMatches.length;
+region.specialIds = specialMatches.map(p => {
+const parts = p.url.split('/');
+return parseInt(parts[parts.length - 2]);
+});
+}
+});
+renderFilters(); // Re-renderizar para mostrar los contadores especiales una vez calculados
+updateCounter();
+
+searchInput.addEventListener('input', (e) => {
+const query = e.target.value.toLowerCase().trim();
+searchDropdown.innerHTML = '';
+if (query.length < 2) {
+searchDropdown.classList.add('hidden');
+return;
+}
+
+// Filtrar resultados para el Dropdown (máx 6 para no saturar UI)
+const matches = allPokemonData.filter(p => p.name.includes(query)).slice(0, 6);
+if (matches.length > 0) {
+searchDropdown.classList.remove('hidden');
+matches.forEach(match => {
+const li = document.createElement('li');
+const displayName = match.name.replace(/-/g, ' ');
+li.className = 'px-4 py-3 hover:bg-gray-50 cursor-pointer transition-colors capitalize text-sm font-medium flex items-center justify-between group';
+li.innerHTML = `<span>${displayName}</span> <i class="fa-solid fa-chevron-right text-gray-300 opacity-0 group-hover:opacity-100 transition-opacity"></i>`;
+// Seleccionar un Pokémon desde el dropdown
+li.onmousedown = () => showSinglePokemon(match);
+searchDropdown.appendChild(li);
+});
+} else {
+searchDropdown.classList.add('hidden');
+}
+});
+
+// NUEVO: Ejecutar búsqueda global completa al presionar "Enter"
+searchInput.addEventListener('keydown', (e) => {
+if (e.key === 'Enter') {
+const query = e.target.value.toLowerCase().trim();
+if (query.length < 2) return;
+searchDropdown.classList.add('hidden');
+// Trae TODOS los resultados globales que coincidan, sin importar generación
+const matches = allPokemonData.filter(p => p.name.includes(query));
+showSearchResults(matches, query);
+}
+});
+
+// Ocultar dropdown al perder el foco
+searchInput.addEventListener('blur', () => {
+setTimeout(() => searchDropdown.classList.add('hidden'), 200);
+});
+
+} catch (error) {
+console.error("Error inicializando búsqueda:", error);
+}
+}
+
+// NUEVA FUNCIÓN: Mostrar grid completo con resultados de búsqueda globales
+async function showSearchResults(matches, query) {
+searchInput.value = '';
+grid.innerHTML = '';
+loader.classList.remove('hidden');
+backToGridBtn.classList.remove('hidden');
+document.getElementById('back-btn-content').innerHTML = `<i class="fa-solid fa-arrow-left"></i> Volver (Resultados para "${query}")`;
+// Restaurar clases del grid por si venimos de una vista única
+grid.className = "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 lg:gap-6";
+
+try {
+const cardsHTML = matches.map(pokemonRef => {
+const parts = pokemonRef.url.split('/');
+const pokemonId = parseInt(parts[parts.length - 2]);
+const displayName = pokemonRef.name.replace(/-/g, ' ');
+const isSeen = seenPokemon.has(pokemonId);
+return createPokemonCard(pokemonId, displayName, isSeen);
+}).join('');
+loader.classList.add('hidden');
+if (matches.length === 0) {
+grid.innerHTML = `<p class="col-span-full text-center text-gray-500 py-10 font-medium">No se encontraron Pokémon en ninguna generación que coincidan con "${query}".</p>`;
+} else {
+grid.innerHTML = cardsHTML;
+}
+} catch (err) {
+console.error(err);
+loader.classList.add('hidden');
+}
+}
+
+async function showSinglePokemon(pokemonRef) {
+searchInput.value = '';
+searchDropdown.classList.add('hidden');
+grid.innerHTML = '';
+loader.classList.remove('hidden');
+backToGridBtn.classList.remove('hidden');
+document.getElementById('back-btn-content').innerHTML = `<i class="fa-solid fa-arrow-left"></i> Volver al listado`;
+
+try {
+// Extraer ID real
+const parts = pokemonRef.url.split('/');
+const pokemonId = parseInt(parts[parts.length - 2]);
+const displayName = pokemonRef.name.replace(/-/g, ' ');
+const isSeen = seenPokemon.has(pokemonId);
+
+loader.classList.add('hidden');
+// Alterar el grid temporalmente para que el resultado único se vea centrado o destacado
+grid.className = "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 max-w-3xl mx-auto gap-6";
+grid.innerHTML = createPokemonCard(pokemonId, displayName, isSeen);
+} catch (err) {
+console.error(err);
+loader.classList.add('hidden');
+}
+}
+
+window.clearSearch = function() {
+backToGridBtn.classList.add('hidden');
+document.getElementById('back-btn-content').innerHTML = `<i class="fa-solid fa-arrow-left"></i> Volver al listado`;
+// Restaurar clases originales del grid
+grid.className = "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 lg:gap-6";
+loadPokemonByRegion(currentRegion);
+}
+
+// --- 5. RENDERIZADO Y LÓGICA PREVIA ---
+function renderFilters() {
+filtersContainer.innerHTML = '';
+REGIONS.forEach(region => {
+const li = document.createElement('li');
+li.className = 'snap-start';
+const btn = document.createElement('button');
+const isActive = region.id === currentRegion.id;
+btn.className = `px-5 py-2 rounded-full text-sm font-medium transition-colors whitespace-nowrap flex items-center gap-2
+${isActive ? 'bg-pokedex-red text-white shadow-md' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`;
+let btnContent = `<span>${region.name}</span>`;
+const stats = getRegionSeenCount(region);
+// Generar el badge (insignia) con los contadores
+if (stats) {
+const badgeClass = isActive ? 'bg-white text-pokedex-red' : 'bg-white text-gray-500 shadow-sm border border-gray-200';
+btnContent += `<span id="badge-${region.id}" class="text-[10px] sm:text-xs px-2 py-0.5 rounded-full font-bold ${badgeClass}">${stats.count}/${stats.total}</span>`;
+}
+
+btn.innerHTML = btnContent;
+btn.onclick = () => {
+clearSearch(); // Limpiar búsqueda si hay una activa
+currentRegion = region;
+renderFilters();
+};
+
+li.appendChild(btn);
+filtersContainer.appendChild(li);
+});
+}
+
+async function loadPokemonByRegion(region) {
+grid.innerHTML = '';
+loader.classList.remove('hidden');
+
+try {
+let cardsHTML = '';
+
+if (region.type === 'special') {
+const response = await fetch(`https://pokeapi.co/api/v2/pokemon?limit=2000`);
+const data = await response.json();
+const filteredPokemon = data.results.filter(p => {
+if (p.name.includes('-totem')) return false;
+return region.keywords.some(kw => p.name.includes(kw));
+});
+
+cardsHTML = filteredPokemon.map(pokemon => {
+const parts = pokemon.url.split('/');
+const pokemonId = parseInt(parts[parts.length - 2]);
+const isSeen = seenPokemon.has(pokemonId);
+const displayName = pokemon.name.replace(/-/g, ' ');
+return createPokemonCard(pokemonId, displayName, isSeen);
+}).join('');
+
+} else {
+const response = await fetch(`https://pokeapi.co/api/v2/pokemon?limit=${region.limit}&offset=${region.offset}`);
+const data = await response.json();
+cardsHTML = data.results.map((pokemon, index) => {
+const pokemonId = region.offset + index + 1;
+const isSeen = seenPokemon.has(pokemonId);
+return createPokemonCard(pokemonId, pokemon.name, isSeen);
+}).join('');
+}
+
+loader.classList.add('hidden');
+grid.innerHTML = cardsHTML;
+
+} catch (error) {
+console.error("Error cargando Pokémon:", error);
+loader.classList.add('hidden');
+grid.innerHTML = `<p class="col-span-full text-center text-red-500 py-10">Error de conexión.</p>`;
+}
+}
+
+function createPokemonCard(id, name, isSeen) {
+const formattedId = id > 10000 ? 'Forma' : id.toString().padStart(3, '0');
+const imgUrl = `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/${id}.png`;
+const cardStateClass = isSeen ? 'pokemon-seen bg-green-50' : 'pokemon-unseen bg-white';
+const iconColorClass = isSeen ? 'text-green-500' : 'text-gray-300';
+
+return `
+<article class="${cardStateClass} rounded-2xl shadow-sm border border-gray-100 p-4 flex flex-col items-center relative transition-all duration-300 hover:shadow-md hover:-translate-y-1 group" data-id="${id}">
+<button onclick="toggleSeen(${id})" class="absolute top-3 right-3 transition-transform active:scale-90" aria-label="Marcar como visto">
+<i class="fa-solid fa-circle-check text-2xl ${iconColorClass} hover:text-green-400 transition-colors" id="icon-${id}"></i>
+</button>
+<span class="text-xs font-bold text-gray-400 self-start mb-1">${id > 10000 ? '✨ ' : '#'}${formattedId}</span>
+<img src="${imgUrl}" alt="${name}" class="w-24 h-24 sm:w-28 sm:h-28 object-contain my-3 drop-shadow-sm group-hover:scale-110 transition-transform duration-300" loading="lazy" onerror="this.src='https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${id}.png'">
+<h2 class="text-sm sm:text-base font-bold text-gray-700 capitalize mt-auto text-center">${name}</h2>
+</article>
+`;
+}
+
+window.toggleSeen = function(id) {
+const article = document.querySelector(`article[data-id="${id}"]`);
+if(!article) return; // Prevención si no está en el DOM actual
+const icon = document.getElementById(`icon-${id}`);
+
+if (seenPokemon.has(id)) {
+seenPokemon.delete(id);
+article.classList.replace('pokemon-seen', 'pokemon-unseen');
+article.classList.replace('bg-green-50', 'bg-white');
+icon.classList.replace('text-green-500', 'text-gray-300');
+} else {
+seenPokemon.add(id);
+article.classList.replace('pokemon-unseen', 'pokemon-seen');
+article.classList.replace('bg-white', 'bg-green-50');
+icon.classList.replace('text-gray-300', 'text-green-500');
+}
+
+localStorage.setItem('seenPokemon', JSON.stringify([...seenPokemon]));
+updateCounter();
+};
+
+function updateCounter() {
+// Contador global Header
+seenCounter.textContent = seenPokemon.size;
+// NUEVO: Actualizar automáticamente el badge visual de cada región
+REGIONS.forEach(region => {
+const badge = document.getElementById(`badge-${region.id}`);
+if (badge) {
+const stats = getRegionSeenCount(region);
+if (stats) {
+badge.textContent = `${stats.count}/${stats.total}`;
+}
+}
+});
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>
